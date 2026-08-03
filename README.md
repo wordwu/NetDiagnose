@@ -6,9 +6,13 @@ macOS 原生工具：一键扫描整个局域网，识别每台设备的类型�
 
 ## ⬇️ 下载
 
-👉 [点击下载最新版 DMG](https://github.com/wordwu/NetDiagnose/releases)
+**macOS 版**：👉 [下载 DMG](https://github.com/wordwu/NetDiagnose/releases)
 
 首次打开时 macOS 可能提示「无法验证开发者」：**系统设置 → 隐私与安全性 → 仍要打开**。
+
+**Android 版**：👉 [下载 APK](https://github.com/wordwu/NetDiagnose/releases/latest/download/NetDiagnose.apk)
+
+安装前需在手机设置中允许「安装未知来源应用」。安卓版与 Mac 版功能一致，界面为手机适配。
 
 ## ✨ 功能
 
