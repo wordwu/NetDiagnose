@@ -310,7 +310,11 @@ class NetworkScanner {
         }
 
         // Set receive timeout
-        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
+        // ⚠️ Int(0.35) = 0，会把超时设成 0 = 无限阻塞；必须正确换算秒+微秒
+        let secs = Int(timeout)
+        let usecs = Int32((timeout - Double(secs)) * 1_000_000)
+        var tv = timeval(tv_sec: secs, tv_usec: usecs)
+        if tv.tv_sec == 0 && tv.tv_usec == 0 { tv.tv_usec = 200_000 }  // 兜底：绝不允许无限等待
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         // Receive responses
@@ -571,7 +575,10 @@ class NetworkScanner {
         guard sock >= 0 else { return false }
         defer { close(sock) }
 
-        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
+        let secs = Int(timeout)
+        let usecs = Int32((timeout - Double(secs)) * 1_000_000)
+        var tv = timeval(tv_sec: secs, tv_usec: usecs)
+        if tv.tv_sec == 0 && tv.tv_usec == 0 { tv.tv_usec = 200_000 }  // 兜底：绝不允许无限等待
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         var addr = sockaddr_in()
