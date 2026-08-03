@@ -62,18 +62,49 @@ struct DeviceRisk {
 // ---- Network Scanner (macOS native, comprehensive) ----
 class NetworkScanner {
 
+    // MARK: - Process Runner (with timeout)
+
+    /// 运行外部命令，带超时兜底：任何子进程挂起都不会让扫描卡死
+    static func runProcess(_ executable: String, args: [String], timeout: TimeInterval = 5, captureOutput: Bool = true) -> (status: Int32, output: String) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: executable)
+        task.arguments = args
+        let pipe = Pipe()
+        if captureOutput {
+            task.standardOutput = pipe
+        } else {
+            task.standardOutput = FileHandle.nullDevice
+        }
+        task.standardError = FileHandle.nullDevice
+
+        do {
+            try task.run()
+        } catch {
+            return (-1, "")
+        }
+
+        // 轮询等待，超时强制终止，绝不让调用方无限等下去
+        let start = Date()
+        while task.isRunning && Date().timeIntervalSince(start) < timeout {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if task.isRunning {
+            task.terminate()
+            task.waitUntilExit()
+        }
+        let out = captureOutput
+            ? (String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "")
+            : ""
+        return (task.terminationStatus, out)
+    }
+
     // MARK: - ARP Table
 
     /// Parse `arp -a` for MAC addresses
     static func arpTable() -> [ArpEntry] {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/arp")
-        task.arguments = ["-a"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        try? task.run()
-        task.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let result = runProcess("/usr/sbin/arp", args: ["-a"], timeout: 5)
+        guard result.status != -1 else { return [] }
+        let output = result.output
 
         var entries = [ArpEntry]()
         for line in output.components(separatedBy: "\n") {
@@ -135,31 +166,30 @@ class NetworkScanner {
                             "_companion-link._tcp.", "_music._tcp.", "_miio._udp."]
         }
         var all = [BonjourService]()
-
+        let lock = NSLock()
+        let group = DispatchGroup()
+        let queue = DispatchQueue.global(qos: .userInitiated)
         for stype in serviceTypes {
-            if let results = bonjourBrowse(type: stype, interface: interface, wait: mode == .deep ? 0.8 : 1.0) {
-                all.append(contentsOf: results)
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+                if let results = NetworkScanner.bonjourBrowse(type: stype, interface: interface, wait: mode == .deep ? 0.8 : 1.0) {
+                    lock.lock()
+                    all.append(contentsOf: results)
+                    lock.unlock()
+                }
             }
         }
+        // 总预算 25 秒，超时放弃剩余类型，保证该阶段有界
+        _ = group.wait(timeout: .now() + 25)
         return all
     }
 
     private static func bonjourBrowse(type: String, interface: String, wait: TimeInterval) -> [BonjourService]? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/dns-sd")
-        task.arguments = ["-B", type, "local."]
-        task.environment = ProcessInfo.processInfo.environment
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-
-        try? task.run()
-        // Give it 1.5 seconds to collect
-        Thread.sleep(forTimeInterval: wait)
-        task.terminate()
-        task.waitUntilExit()
-
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        // dns-sd -B 不会自己退出，超时后强制终止
+        let result = runProcess("/usr/bin/dns-sd", args: ["-B", type, "local."], timeout: wait + 0.5)
+        guard result.status != -1 else { return nil }
+        let output = result.output
         var services = [BonjourService]()
 
         for line in output.components(separatedBy: "\n") {
@@ -183,19 +213,9 @@ class NetworkScanner {
     }
 
     private static func bonjourResolve(name: String, type: String, interface: String) -> BonjourService? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/dns-sd")
-        task.arguments = ["-G", "v4", "\(name).\(type)local."]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-
-        try? task.run()
-        Thread.sleep(forTimeInterval: 0.3)
-        task.terminate()
-        task.waitUntilExit()
-
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let result = runProcess("/usr/bin/dns-sd", args: ["-G", "v4", "\(name).\(type)local."], timeout: 0.8)
+        guard result.status != -1 else { return nil }
+        let output = result.output
         var hostname = name, ip = "", port = 0
 
         for line in output.components(separatedBy: "\n") {
@@ -460,46 +480,30 @@ class NetworkScanner {
                 }
             }
         }
-        group.wait()
+        // 兜底：最多等 60 秒（32 并发两轮 ping 正常情况下远小于此）
+        _ = group.wait(timeout: .now() + 60)
         return results
     }
 
     /// Single ping via /sbin/ping
     static func ping(ip: String) -> Bool {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/sbin/ping")
-        task.arguments = ["-c", "1", "-W", "1000", ip]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-
-        try? task.run()
-        task.waitUntilExit()
-        return task.terminationStatus == 0
+        let result = runProcess("/sbin/ping", args: ["-c", "1", "-W", "1000", ip], timeout: 3, captureOutput: false)
+        return result.status == 0
     }
 
     /// Measure latency to a single IP. Returns avg round-trip in ms, or nil if unreachable.
-    /// Uses /sbin/ping with 3 packets, parses "avg" from the summary line.
+    /// Uses /sbin/ping with 2 packets, parses "avg" from the summary line.
     static func measureLatency(ip: String) -> Double? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/sbin/ping")
-        task.arguments = ["-c", "3", "-t", "1", "-W", "3000", ip]
-        let pipe = Pipe(); task.standardOutput = pipe; task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            task.waitUntilExit()
-            if task.terminationStatus != 0 { return nil }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8) else { return nil }
-            if let range = output.range(of: " = "),
-               let endRange = output[range.upperBound...].range(of: " ms") {
-                let stats = String(output[range.upperBound..<endRange.lowerBound])
-                let parts = stats.split(separator: "/")
-                if parts.count >= 4, let avg = Double(parts[1]) { return avg }
-            }
-            return nil
-        } catch {
-            return nil
+        let result = runProcess("/sbin/ping", args: ["-c", "2", "-t", "1", "-W", "2000", ip], timeout: 4)
+        guard result.status != -1 else { return nil }
+        let output = result.output
+        if let range = output.range(of: " = "),
+           let endRange = output[range.upperBound...].range(of: " ms") {
+            let stats = String(output[range.upperBound..<endRange.lowerBound])
+            let parts = stats.split(separator: "/")
+            if parts.count >= 4, let avg = Double(parts[1]) { return avg }
         }
+        return nil
     }
 
     // MARK: - Port Scan
@@ -686,14 +690,8 @@ class NetworkScanner {
     /// Detect local network info (auto-detect interface)
     static func detectLocalNetwork() -> LocalNetworkInfo? {
         // Get gateway from routing table
-        let routeTask = Process()
-        routeTask.executableURL = URL(fileURLWithPath: "/sbin/route")
-        routeTask.arguments = ["-n", "get", "default"]
-        let routePipe = Pipe()
-        routeTask.standardOutput = routePipe
-        try? routeTask.run()
-        routeTask.waitUntilExit()
-        let routeOutput = String(data: routePipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let routeResult = runProcess("/sbin/route", args: ["-n", "get", "default"], timeout: 5)
+        let routeOutput = routeResult.output
 
         var gatewayIP = "192.168.1.1"
         var routeInterface = "en0"
@@ -740,14 +738,9 @@ class NetworkScanner {
     }
 
     private static func getInterfaceInfo(_ iface: String) -> (ip: String, mask: String)? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
-        task.arguments = [iface]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        try? task.run()
-        task.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let result = runProcess("/sbin/ifconfig", args: [iface], timeout: 5)
+        guard result.status != -1 else { return nil }
+        let output = result.output
 
         var ip = ""
         var mask = ""
@@ -778,14 +771,9 @@ class NetworkScanner {
     }
 
     private static func listInterfaces() -> [String] {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
-        task.arguments = ["-l"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        try? task.run()
-        task.waitUntilExit()
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let result = runProcess("/sbin/ifconfig", args: ["-l"], timeout: 5)
+        guard result.status != -1 else { return [] }
+        let output = result.output
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
             .components(separatedBy: .whitespaces)
     }

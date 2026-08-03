@@ -33,13 +33,9 @@ struct WiFiScanner {
     private static func tryAirport() -> [WiFiNetwork]? {
         let paths = ["/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport", "/usr/sbin/airport"]
         guard let p = paths.first(where: { FileManager.default.fileExists(atPath: $0) }) else { return nil }
-        let t = Process(); t.executableURL = URL(fileURLWithPath: p); t.arguments = ["-s"]
-        let pipe = Pipe(); t.standardOutput = pipe; t.standardError = FileHandle.nullDevice
-        do { try t.run(); t.waitUntilExit()
-            guard t.terminationStatus == 0 else { return nil }
-            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            return parseAirportOutput(out)
-        } catch { return nil }
+        let result = NetworkScanner.runProcess(p, args: ["-s"], timeout: 8)
+        guard result.status == 0 else { return nil }
+        return parseAirportOutput(result.output)
     }
 
     private static func parseAirportOutput(_ out: String) -> [WiFiNetwork] {
@@ -68,12 +64,9 @@ struct WiFiScanner {
     }
 
     private static func trySystemProfiler() -> [WiFiNetwork] {
-        let t = Process(); t.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-        t.arguments = ["SPAirPortDataType"]
-        let pipe = Pipe(); t.standardOutput = pipe; t.standardError = FileHandle.nullDevice
-        do { try t.run(); t.waitUntilExit()
-            return parseSystemProfiler(String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "")
-        } catch { return [] }
+        let result = NetworkScanner.runProcess("/usr/sbin/system_profiler", args: ["SPAirPortDataType"], timeout: 12)
+        guard result.status != -1 else { return [] }
+        return parseSystemProfiler(result.output)
     }
 
     private static func parseSystemProfiler(_ out: String) -> [WiFiNetwork] {

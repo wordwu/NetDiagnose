@@ -196,7 +196,8 @@ class ScanOrchestrator: ObservableObject {
                 // Phase 0: Auto-detect gateway/localIP always
                 scanProgress = "自动检测网络..."
                 progressValue = 0.02
-                if let info = NetworkScanner.detectLocalNetwork() {
+                let detected = await Task.detached { NetworkScanner.detectLocalNetwork() }.value
+                if let info = detected {
                     gateway = info.gatewayIP
                     localIP = info.localIP
                     netmask = info.netmask
