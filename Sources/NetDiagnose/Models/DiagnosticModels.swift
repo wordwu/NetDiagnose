@@ -53,6 +53,7 @@ struct DeviceSnapshot: Codable, Equatable, Identifiable {
     var openPorts: [Int]
     var isGateway: Bool
     var isLocalDevice: Bool
+    var isStealth: Bool = false
     var riskLevel: RiskLevel
     var latencyMs: Double?
 
@@ -65,8 +66,29 @@ struct DeviceSnapshot: Codable, Equatable, Identifiable {
         openPorts = device.openPorts
         isGateway = device.isGateway
         isLocalDevice = device.isLocalDevice
+        isStealth = device.isStealth
         riskLevel = device.riskLevel
         latencyMs = device.latencyMs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case ipAddress, macAddress, hostname, vendor, deviceType, openPorts
+        case isGateway, isLocalDevice, isStealth, riskLevel, latencyMs
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ipAddress = try c.decode(String.self, forKey: .ipAddress)
+        macAddress = try c.decodeIfPresent(String.self, forKey: .macAddress)
+        hostname = try c.decodeIfPresent(String.self, forKey: .hostname)
+        vendor = try c.decodeIfPresent(String.self, forKey: .vendor)
+        deviceType = try c.decode(DeviceType.self, forKey: .deviceType)
+        openPorts = try c.decode([Int].self, forKey: .openPorts)
+        isGateway = try c.decode(Bool.self, forKey: .isGateway)
+        isLocalDevice = try c.decode(Bool.self, forKey: .isLocalDevice)
+        isStealth = try c.decodeIfPresent(Bool.self, forKey: .isStealth) ?? false
+        riskLevel = try c.decode(RiskLevel.self, forKey: .riskLevel)
+        latencyMs = try c.decodeIfPresent(Double.self, forKey: .latencyMs)
     }
 }
 

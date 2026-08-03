@@ -116,20 +116,35 @@ class NetworkScanner {
     // MARK: - mDNS / Bonjour
 
     /// Discover mDNS services using `dns-sd`
-    static func bonjourScan(interface: String) -> [BonjourService] {
-        let serviceTypes = ["_http._tcp.", "_hap._tcp.", "_airplay._tcp.",
-                           "_printer._tcp.", "_smb._tcp."]
+    static func bonjourScan(interface: String, mode: ScanMode = .standard) -> [BonjourService] {
+        let serviceTypes: [String]
+        switch mode {
+        case .quick:
+            serviceTypes = []
+        case .standard:
+            serviceTypes = ["_http._tcp.", "_hap._tcp.", "_airplay._tcp.",
+                            "_printer._tcp.", "_smb._tcp.", "_googlecast._tcp.",
+                            "_spotify-connect._tcp.", "_raop._tcp.", "_ipp._tcp.",
+                            "_afpovertcp._tcp.", "_rfb._tcp.", "_homekit._tcp."]
+        case .deep:
+            serviceTypes = ["_http._tcp.", "_hap._tcp.", "_airplay._tcp.",
+                            "_printer._tcp.", "_smb._tcp.", "_googlecast._tcp.",
+                            "_spotify-connect._tcp.", "_raop._tcp.", "_ipp._tcp.",
+                            "_afpovertcp._tcp.", "_rfb._tcp.", "_homekit._tcp.",
+                            "_pdl-datastream._tcp.", "_sftp-ssh._tcp.", "_ssh._tcp.",
+                            "_companion-link._tcp.", "_music._tcp.", "_miio._udp."]
+        }
         var all = [BonjourService]()
 
         for stype in serviceTypes {
-            if let results = bonjourBrowse(type: stype, interface: interface) {
+            if let results = bonjourBrowse(type: stype, interface: interface, wait: mode == .deep ? 0.8 : 1.0) {
                 all.append(contentsOf: results)
             }
         }
         return all
     }
 
-    private static func bonjourBrowse(type: String, interface: String) -> [BonjourService]? {
+    private static func bonjourBrowse(type: String, interface: String, wait: TimeInterval) -> [BonjourService]? {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/dns-sd")
         task.arguments = ["-B", type, "local."]
@@ -140,7 +155,7 @@ class NetworkScanner {
 
         try? task.run()
         // Give it 1.5 seconds to collect
-        Thread.sleep(forTimeInterval: 1.5)
+        Thread.sleep(forTimeInterval: wait)
         task.terminate()
         task.waitUntilExit()
 
@@ -368,17 +383,67 @@ class NetworkScanner {
 
     // MARK: - Ping Sweep
 
-    /// Ping sweep a /24 subnet
+    /// 根据网络地址（4 段）和掩码生成网段内所有主机 IP
+    static func hostIPs(subnet: String, netmask: String) -> [String] {
+        let ipParts = subnet.split(separator: ".").compactMap { Int($0) }
+        let maskParts = netmask.split(separator: ".").compactMap { Int($0) }
+        guard ipParts.count == 4, maskParts.count == 4 else {
+            // 兜底：/24 的 1...254
+            let prefix = subnet.components(separatedBy: ".").prefix(3).joined(separator: ".")
+            return (1...254).map { "\(prefix).\($0)" }
+        }
+
+        // 计算网络地址（IP & 掩码）
+        let network = (0..<4).map { ipParts[$0] & maskParts[$0] }
+        // 计算主机位数量
+        let binary = maskParts.map { String($0, radix: 2) }.joined()
+        let hostBits = binary.filter { $0 == "0" }.count
+        let hostCount = hostBits >= 31 ? 0 : (1 << hostBits) - 2
+        guard hostCount > 0 else {
+            let prefix = network.prefix(3).map(String.init).joined(separator: ".")
+            return (1...254).map { "\(prefix).\($0)" }
+        }
+
+        // 主机数超过 4094（/20 及更宽）不实际扫描，限制在 /20 内
+        let capped = min(hostCount, 4094)
+        var ips: [String] = []
+        let base = network[0] << 24 | network[1] << 16 | network[2] << 8 | network[3]
+        for offset in 1...capped {
+            let ip = base + offset
+            ips.append("\((ip >> 24) & 0xff).\((ip >> 16) & 0xff).\((ip >> 8) & 0xff).\(ip & 0xff)")
+        }
+        return ips
+    }
+
+    /// Ping sweep an IP list（两轮：第一轮未响应的第二轮补扫，降低偶发丢包漏报）
+    static func pingSweep(ips: [String], skipIPs: Set<String> = [], maxConcurrent: Int = 32) -> [PingResult] {
+        let toCheck = ips.filter { !skipIPs.contains($0) }
+        var results = pingBatch(toCheck, maxConcurrent: maxConcurrent)
+
+        // 第二轮补扫
+        let hit = Set(results.map { $0.ip })
+        let missed = toCheck.filter { !hit.contains($0) }
+        if !missed.isEmpty {
+            results += pingBatch(missed, maxConcurrent: maxConcurrent)
+        }
+        return results
+    }
+
+    /// 旧签名保留兼容：默认 /24
     static func pingSweep(subnet: String, skipIPs: Set<String> = [], maxConcurrent: Int = 32) -> [PingResult] {
+        let prefix = subnet.components(separatedBy: ".").prefix(3).joined(separator: ".")
+        let ips = (1...254).map { "\(prefix).\($0)" }
+        return pingSweep(ips: ips, skipIPs: skipIPs, maxConcurrent: maxConcurrent)
+    }
+
+    private static func pingBatch(_ ips: [String], maxConcurrent: Int) -> [PingResult] {
         var results = [PingResult]()
         let queue = DispatchQueue(label: "nettopo.ping", attributes: .concurrent)
         let group = DispatchGroup()
         let lock = NSLock()
         let throttle = DispatchSemaphore(value: max(1, maxConcurrent))
 
-        for i in 1...254 {
-            let ip = "\(subnet).\(i)"
-            if skipIPs.contains(ip) { continue }
+        for ip in ips {
             group.enter()
             queue.async {
                 throttle.wait()
@@ -458,7 +523,7 @@ class NetworkScanner {
             // Web
             (80, t), (443, t), (8080, t*0.8), (3000, t*0.8), (8443, t*0.8),
             // Network / mgmt
-            (22, t*0.8), (23, t*0.6), (161, t*0.6),
+            (22, t*0.8), (23, t*0.6),
             // NAS / file sharing
             (445, t*0.8), (548, t*0.8), (5000, t*0.8), (5001, t*0.8),
             // Printing
@@ -467,10 +532,8 @@ class NetworkScanner {
             (554, t*0.8), (5543, t*0.6), (1883, t*0.8), (8883, t*0.6),
             // Apple
             (62078, t*0.6), (7000, t*0.6),
-            // UPnP / DLNA
-            (1900, t*0.6), (8200, t*0.6),
-            // mDNS
-            (5353, t*0.8)
+            // DLNA
+            (8200, t*0.6)
         ]
 
         switch mode {
@@ -486,7 +549,71 @@ class NetworkScanner {
                 (9090, t*0.6), (32400, t*0.6)
             ]
         }
-        return scanPorts(ip: ip, ports: ports, maxConcurrent: mode.portConcurrency)
+        var open = scanPorts(ip: ip, ports: ports, maxConcurrent: mode.portConcurrency)
+
+        // UDP 服务探测（SNMP / UPnP / mDNS）——这些是 UDP 端口，不能走 TCP
+        if mode != .quick {
+            for udpPort in [161, 1900, 5353] where udpProbe(ip: ip, port: udpPort, timeout: t) {
+                open.append(udpPort)
+            }
+        }
+        return open.sorted()
+    }
+
+    /// UDP 服务探测：SNMP(161) / UPnP(1900) / mDNS(5353)
+    /// 发送对应协议的真实探测包，收到任何响应视为端口开放
+    private static func udpProbe(ip: String, port: Int, timeout: TimeInterval) -> Bool {
+        let sock = socket(AF_INET, SOCK_DGRAM, 0)
+        guard sock >= 0 else { return false }
+        defer { close(sock) }
+
+        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        inet_pton(AF_INET, ip, &addr.sin_addr)
+
+        let payload: [UInt8]
+        switch port {
+        case 161:  // SNMPv1 GET sysDescr（community: public）
+            payload = [0x30, 0x29, 0x02, 0x01, 0x00, 0x04, 0x06, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63,
+                       0xa0, 0x1c, 0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00,
+                       0x30, 0x0e, 0x30, 0x0c, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00, 0x05, 0x00]
+        case 1900:  // UPnP M-SEARCH
+            let msg = "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n"
+            return msg.withCString { cstr in
+                let sent = withUnsafePointer(to: &addr) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                        sendto(sock, cstr, strlen(cstr), 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                guard sent >= 0 else { return false }
+                var buf = [UInt8](repeating: 0, count: 4096)
+                return recv(sock, &buf, buf.count, 0) > 0
+            }
+        case 5353:  // mDNS PTR 查询 _services._dns-sd._udp.local
+            payload = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                       0x09, 0x5f, 0x73, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x73,
+                       0x07, 0x5f, 0x64, 0x6e, 0x73, 0x2d, 0x73, 0x64,
+                       0x04, 0x5f, 0x75, 0x64, 0x70,
+                       0x05, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00,
+                       0x00, 0x0c, 0x00, 0x01]
+        default:
+            return false
+        }
+
+        let sent = payload.withUnsafeBytes { buf in
+            withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    sendto(sock, buf.baseAddress, payload.count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        }
+        guard sent >= 0 else { return false }
+        var recvBuf = [UInt8](repeating: 0, count: 4096)
+        return recv(sock, &recvBuf, recvBuf.count, 0) > 0
     }
 
     private static func scanPorts(ip: String, ports: [(Int, TimeInterval)], maxConcurrent: Int = 16) -> [Int] {
@@ -677,71 +804,102 @@ class NetworkScanner {
         guard ipParts.count == 4, maskParts.count == 4 else {
             return ip.components(separatedBy: ".").dropLast().joined(separator: ".")
         }
-        return (0..<3).map { String(ipParts[$0] & maskParts[$0]) }.joined(separator: ".")
+        return (0..<4).map { String(ipParts[$0] & maskParts[$0]) }.joined(separator: ".")
+    }
+
+    /// 根据 CIDR 前缀位数生成子网掩码（如 24 → 255.255.255.0）
+    static func netmask(forPrefix bits: Int) -> String {
+        let clamped = min(max(bits, 0), 32)
+        let full: UInt32 = clamped >= 32 ? 0xFFFFFFFF : (0xFFFFFFFF << (32 - clamped))
+        return "\((full >> 24) & 0xff).\((full >> 16) & 0xff).\((full >> 8) & 0xff).\(full & 0xff)"
+    }
+
+    /// 从子网掩码计算前缀位数（如 255.255.255.0 → 24）
+    static func prefixBits(of mask: String) -> Int {
+        let parts = mask.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return 24 }
+        let binary = parts.map { String($0, radix: 2) }.joined()
+        return binary.prefix { $0 == "1" }.count
     }
 
     // MARK: - Device Type Guessing (enhanced)
 
     /// Guess device type from all available clues
     static func guessDevice(ip: String, mac: String?, vendor: String?, hostname: String?,
-                           ports: [Int], bonjourServices: [String] = []) -> DeviceType {
+                           ports: [Int], bonjourServices: [String] = [], gatewayIP: String? = nil) -> DeviceType {
         let portsSet = Set(ports)
         let hname = (hostname ?? "").lowercased()
         let vend = (vendor ?? "").lowercased()
         let svcSet = Set(bonjourServices)
 
-        // 1. Gateway
-        if ip.hasSuffix(".1") { return .router }
+        // 1) 网关：传入的网关 IP 优先，其次按 .1 兜底
+        if ip == gatewayIP || (gatewayIP == nil && ip.hasSuffix(".1")) { return .router }
 
-        // 2. By MAC vendor
-        if vend.contains("asus") || vend.contains("tp-link") || vend.contains("netgear") ||
-           vend.contains("ubiquiti") || vend.contains("mikrotik") || vend.contains("cisco") {
-            return .router
+        // 2) Bonjour 自报（设备自己报的类型最可靠）
+        if svcSet.contains("_printer._tcp.") || svcSet.contains("_pdl-datastream._tcp.") || svcSet.contains("_ipp._tcp.") { return .printer }
+        if svcSet.contains("_smb._tcp.") || svcSet.contains("_afpovertcp._tcp.") { return .nas }
+        if svcSet.contains("_airplay._tcp.") || svcSet.contains("_googlecast._tcp.") || svcSet.contains("_spotify-connect._tcp.") || svcSet.contains("_raop._tcp.") { return .tv }
+        if svcSet.contains("_hap._tcp.") || svcSet.contains("_homekit._tcp.") || svcSet.contains("_miio._udp.") { return .iot }
+
+        // 3) 主机名具体设备词（先于品牌词，避免"xiaomi 的插座"被认成手机）
+        let nasWords = ["nas", "diskstation", "synology", "qnap", "wdmycloud", "freenas", "truenas", "nvr", "storage", "raid", "media-server"]
+        let camWords = ["camera", "cam-", "cam_", "ipc", "hikvision", "dahua", "reolink", "doorbell", "cctv"]
+        let printerWords = ["printer", "brother", "canon-", "epson", "xerox", "laserjet", "deskjet", "inkjet"]
+        let iotWords = ["plug", "socket", "sensor", "light", "bulb", "switch", "outlet", "curtain", "lock", "door",
+                        "smoke", "leak", "motion", "contact", "thermometer", "humidity", "humidifier", "purifier",
+                        "water", "heater", "kettle", "yeelight", "philips-hue", "shelly", "sonoff", "tasmota",
+                        "esphome", "tuya", "aqara", "lumi", "viomi", "chuangmi", "cleaner", "vacuum", "fan",
+                        "acpartner", "aircondition", "tv-box", "settop", "dongle", "speaker", "soundbar", "eco"]
+        let phoneWords = ["iphone", "ipad", "android", "pixel", "oneplus", "redmi", "honor", "oppo", "vivo",
+                          "meizu", "nokia", "samsung-sm", "galaxy", "huawei-p", "huawei-mate", "huawei-nova"]
+
+        for w in nasWords { if hname.contains(w) || vend.contains(w) { return .nas } }
+        for w in camWords { if hname.contains(w) { return .camera } }
+        for w in printerWords { if hname.contains(w) || vend.contains(w) { return .printer } }
+        for w in iotWords { if hname.contains(w) || vend.contains(w) { return .iot } }
+        for w in phoneWords { if hname.contains(w) { return .phone } }
+
+        // 4) 端口签名（组合比单端口可靠）
+        if portsSet.contains(5000) && portsSet.contains(5001) { return .nas }          // Synology / QNAP
+        if portsSet.contains(445) && portsSet.contains(548) { return .nas }            // SMB + AFP
+        if portsSet.contains(515) && portsSet.contains(631) { return .printer }        // LPR + IPP
+        if portsSet.contains(554) || portsSet.contains(5543) { return .camera }        // RTSP
+        if portsSet.contains(1883) || portsSet.contains(8883) { return .iot }          // MQTT
+        if portsSet.contains(5353) && portsSet.contains(80) { return .iot }            // mDNS + Web = 智能设备
+        if portsSet.contains(5000) || portsSet.contains(5001) { return .nas }
+        if portsSet.contains(515) || portsSet.contains(631) || portsSet.contains(9100) { return .printer }
+
+        // 5) 手机品牌厂商：无服务端口 → 手机
+        let phoneVendors = ["apple", "samsung", "xiaomi", "huawei", "honor", "oppo", "vivo",
+                            "oneplus", "google", "motorola", "nokia", "meizu", "realme", "zte", "lenovo-mobile"]
+        if vend.range(of: phoneVendors.joined(separator: "|"), options: .regularExpression) != nil && portsSet.isEmpty {
+            return .phone
         }
 
-        // 3. By ports
-        if portsSet.contains(554) || portsSet.contains(5543) { return .camera }
-        if portsSet.contains(5000) || portsSet.contains(5001) { return .nas }
-        if portsSet.contains(445) || portsSet.contains(548) { return .nas }
-        if portsSet.contains(515) || portsSet.contains(631) || portsSet.contains(9100) { return .printer }
-        if portsSet.contains(1883) || portsSet.contains(8883) { return .iot }
-
-        // 4. By hostname keywords
-        let nasWords = ["nas", "diskstation", "synology", "qnap", "wdmycloud", "freenas", "truenas"]
-        let camWords = ["cam", "ipc", "camera", "hikvision", "dahua", "reolink", "doorbell"]
-        let printerWords = ["printer", "brother", "hp-", "canon-", "epson", "xerox"]
-        let phoneWords = ["iphone", "ipad", "android", "pixel", "samsung", "oneplus", "huawei", "xiaomi", "redmi"]
-        let appleWords = ["apple", "macbook", "imac", "macpro", "macmini", "iphone", "ipad", "ipod", "homepod"]
-        let iotWords = ["yeelight", "xiaomi", "mi-", "philips-hue", "tplink", "kasa", "wemo", "shelly",
-                        "sonoff", "tasmota", "esphome", "esp-", "sensor", "thermometer", "hvac",
-                        "purifier", "humidifier", "water", "plug", "switch", "light", "bulb", "outlet",
-                        "viomi", "chuangmi", "aqara", "lumi", "motion", "contact", "leak", "smoke",
-                        "curtain", "lock", "door"]
-
-        for word in nasWords { if hname.contains(word) || vend.contains(word) { return .nas } }
-        for word in camWords { if hname.contains(word) { return .camera } }
-        for word in printerWords { if hname.contains(word) || vend.contains(word) { return .printer } }
-        for word in phoneWords { if hname.contains(word) { return .phone } }
-        for word in appleWords { if hname.contains(word) || vend.contains("apple") { return .phone } }
-        for word in iotWords { if hname.contains(word) || vend.contains(word) { return .iot } }
-
-        // 5. By vendor
-        if vend.contains("intel") || vend.contains("dell") || vend.contains("hp") ||
-           vend.contains("lenovo") || vend.contains("asus") && !ip.hasSuffix(".1") { return .computer }
-        if vend.contains("raspberry") { return .computer }  // Pi often runs as server
-        if vend.contains("sony") || vend.contains("samsung") || vend.contains("lg") { return .tv }
-        if vend.contains("nest") || vend.contains("ring") || vend.contains("arlo") { return .camera }
-
-        // 6. By Bonjour services
-        if svcSet.contains("_airplay._tcp.") { return .tv }
-        if svcSet.contains("_hap._tcp.") || svcSet.contains("_homekit._tcp.") { return .iot }
-        if svcSet.contains("_printer._tcp.") { return .printer }
-        if svcSet.contains("_smb._tcp.") { return .nas }
-
-        // 7. Port-based fallback
-        if portsSet.contains(80) || portsSet.contains(443) || portsSet.contains(8080) {
+        // 6) 网络设备品牌：开 Web 管理端口 → 路由器；否则电脑（网卡/笔记本）
+        let networkBrands = ["asus", "tp-link", "tplink", "netgear", "ubiquiti", "mikrotik", "cisco",
+                             "d-link", "dlink", "tenda", "mercury", "huawei", "zte", "linksys", "arris"]
+        if vend.range(of: networkBrands.joined(separator: "|"), options: .regularExpression) != nil
+            || hname.range(of: networkBrands.joined(separator: "|"), options: .regularExpression) != nil {
+            if portsSet.contains(80) || portsSet.contains(443) || portsSet.contains(8080) || portsSet.contains(8443) {
+                return .router
+            }
             return .computer
         }
+
+        // 7) 厂商兜底
+        if vend.contains("intel") || vend.contains("dell") || vend.contains("hp") || vend.contains("lenovo") ||
+           vend.contains("msi") || vend.contains("gigabyte") || vend.contains("acer") || vend.contains("raspberry") ||
+           vend.contains("apple") || vend.contains("microsoft") { return .computer }
+        if vend.contains("sony") || vend.contains("lg") { return .tv }
+        if vend.contains("nest") || vend.contains("ring") || vend.contains("arlo") ||
+           vend.contains("hikvision") || vend.contains("dahua") { return .camera }
+        if vend.contains("synology") || vend.contains("qnap") || vend.contains("wd") ||
+           vend.contains("seagate") || vend.contains("western") { return .nas }
+
+        // 8) 端口兜底
+        if portsSet.contains(80) || portsSet.contains(443) || portsSet.contains(8080) ||
+           portsSet.contains(22) || portsSet.contains(8443) { return .computer }
 
         return .unknown
     }

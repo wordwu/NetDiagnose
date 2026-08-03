@@ -21,6 +21,10 @@ class DeviceNotesService: ObservableObject {
         notes[device.ipAddress] ?? DeviceNote(ip: device.ipAddress)
     }
 
+    func get(ip: String) -> DeviceNote {
+        notes[ip] ?? DeviceNote(ip: ip)
+    }
+
     func set(note: DeviceNote) {
         notes[note.ip] = note
         save()
@@ -48,17 +52,19 @@ struct DeviceNote: Codable, Identifiable, Equatable {
     var label: String
     var memo: String
     var isKnown: Bool
+    var learnedType: DeviceType? = nil   // 用户手动指定的设备类型，识别时优先采用
     var updatedAt: Date
 
-    init(ip: String, label: String = "", memo: String = "", isKnown: Bool = false, updatedAt: Date = Date()) {
+    init(ip: String, label: String = "", memo: String = "", isKnown: Bool = false, learnedType: DeviceType? = nil, updatedAt: Date = Date()) {
         self.ip = ip
         self.label = label
         self.memo = memo
         self.isKnown = isKnown
+        self.learnedType = learnedType
         self.updatedAt = updatedAt
     }
 
     var isEmpty: Bool {
-        label.isEmpty && memo.isEmpty && !isKnown
+        label.isEmpty && memo.isEmpty && !isKnown && learnedType == nil
     }
 }

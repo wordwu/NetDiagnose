@@ -58,14 +58,16 @@ class ScanOrchestrator: ObservableObject {
                                    offlineCount: 0, avgLatency: nil, dangerousPortCount: 0, unknownCount: 0)
         }
         let online = result.devices.filter { $0.isOnline }
-        if online.isEmpty {
+        let stealthCount = result.devices.filter { $0.isStealth }.count
+        let visibleCount = result.devices.count - stealthCount
+        if online.isEmpty && visibleCount > 0 {
             return HealthBreakdown(total: 0, baseScore: 100, offlinePenalty: 0,
                                    latencyPenalty: 0, portPenalty: 0, unknownPenalty: 0,
-                                   offlineCount: result.devices.count, avgLatency: nil, dangerousPortCount: 0, unknownCount: 0)
+                                   offlineCount: visibleCount, avgLatency: nil, dangerousPortCount: 0, unknownCount: 0)
         }
 
-        // Offline penalty
-        let offline = result.devices.count - online.count
+        // Offline penalty（隐身设备不算离线）
+        let offline = result.devices.filter { !$0.isOnline && !$0.isStealth }.count
         let offlinePenalty = min(offline * 2, 15)
 
         // Latency penalty
@@ -122,9 +124,14 @@ class ScanOrchestrator: ObservableObject {
         var tips: [String] = []
         guard let result = scanResult else { return tips }
         let online = result.devices.filter { $0.isOnline }
+        let offline = result.devices.filter { !$0.isOnline && !$0.isStealth }
+        let stealth = result.devices.filter { $0.isStealth }
 
-        if result.devices.count - online.count > 3 {
-            tips.append("有 \(result.devices.count - online.count) 台设备离线，检查是否正常关机或断开连接")
+        if offline.count > 3 {
+            tips.append("有 \(offline.count) 台设备离线，检查是否正常关机或断开连接")
+        }
+        if !stealth.isEmpty {
+            tips.append("\(stealth.count) 台设备在 ARP 表中但未响应 ping（可能屏蔽了 ICMP），已标记为隐身设备，不扣分")
         }
         if let avg = avgLatency, avg > 20 {
             tips.append("平均延迟 \(String(format: "%.0f", avg))ms 偏高，检查 WiFi 信号强度或更换信道")
@@ -197,25 +204,39 @@ class ScanOrchestrator: ObservableObject {
                     if resolvedSubnet == nil || resolvedSubnet!.isEmpty {
                         resolvedSubnet = info.subnet
                     }
-                    scanProgress = "检测到: \(info.interfaceName) / \(resolvedSubnet ?? info.subnet).0/24"
+                    scanProgress = "检测到: \(info.interfaceName) / \(info.subnet)/\(NetworkScanner.prefixBits(of: info.netmask))"
                 } else {
-                    if resolvedSubnet == nil { resolvedSubnet = "192.168.50" }
+                    if resolvedSubnet == nil { resolvedSubnet = "192.168.50.0" }
                     scanProgress = "未检测到网络，使用默认子网"
                 }
 
                 guard !Task.isCancelled else { return }
 
-                let subnet = resolvedSubnet!.replacingOccurrences(of: "/24", with: "").replacingOccurrences(of: "/16", with: "")
-                if gateway == nil { gateway = "\(subnet).1" }
-                if localIP == nil { localIP = "\(subnet).126" }
-                if netmask == nil { netmask = "255.255.255.0" }
+                // 解析子网：支持 "192.168.1.0/24"、"192.168.1"、纯 IP 三种写法
+                var subnetRaw = resolvedSubnet ?? ""
+                var prefixBits = 24
+                if subnetRaw.contains("/") {
+                    let parts = subnetRaw.split(separator: "/")
+                    if parts.count == 2, let b = Int(parts[1]), b >= 8, b <= 30 {
+                        prefixBits = b
+                    }
+                    subnetRaw = String(parts[0])
+                }
+                var subnet = subnetRaw
+                if subnet.components(separatedBy: ".").count == 3 { subnet += ".0" }
+                let prefix3 = subnet.components(separatedBy: ".").prefix(3).joined(separator: ".")
+                if gateway == nil { gateway = "\(prefix3).1" }
+                if localIP == nil { localIP = "\(prefix3).126" }
+                let resolvedMask = netmask ?? NetworkScanner.netmask(forPrefix: prefixBits)
+                netmask = resolvedMask
 
                 // Phase 1: Ping sweep
-                scanProgress = "Ping 扫描 \(subnet).0/24..."
+                let allHostIPs = NetworkScanner.hostIPs(subnet: subnet, netmask: resolvedMask)
+                scanProgress = "Ping 扫描 \(subnet)/\(NetworkScanner.prefixBits(of: resolvedMask))（\(allHostIPs.count) 个地址）..."
                 progressValue = 0.05
 
                 let pingResults = await Task.detached {
-                    NetworkScanner.pingSweep(subnet: subnet, skipIPs: [gateway!, localIP!], maxConcurrent: maxPingConcurrency)
+                    NetworkScanner.pingSweep(ips: allHostIPs, skipIPs: [gateway!, localIP!], maxConcurrent: maxPingConcurrency)
                 }.value
 
                 guard !Task.isCancelled else { return }
@@ -253,7 +274,7 @@ class ScanOrchestrator: ObservableObject {
                 if doBonjour {
                     scanProgress = "扫描 mDNS 服务..."
                     progressValue = 0.40
-                    let bonjour = await Task.detached { NetworkScanner.bonjourScan(interface: iface) }.value
+                    let bonjour = await Task.detached { NetworkScanner.bonjourScan(interface: iface, mode: mode) }.value
 
                     guard !Task.isCancelled else { return }
 
@@ -340,7 +361,7 @@ class ScanOrchestrator: ObservableObject {
 
                     let guessedType = NetworkScanner.guessDevice(
                         ip: ip, mac: mac, vendor: vendor,
-                        hostname: hostname, ports: ports, bonjourServices: bonjourTypes
+                        hostname: hostname, ports: ports, bonjourServices: bonjourTypes, gatewayIP: gateway
                     )
                     let type: DeviceType
                     if guessedType == .unknown, let ssdpType = ipToSSDPType[ip] {
@@ -348,7 +369,9 @@ class ScanOrchestrator: ObservableObject {
                     } else {
                         type = guessedType
                     }
-                    let finalType = ip == gateway! ? .router : type
+                    // 用户备注学习：手动标记过的类型优先
+                    let note = DeviceNotesService.shared.get(ip: ip)
+                    let finalType = ip == gateway! ? .router : (note.learnedType ?? type)
 
                     // ── Discovery sources ──
                     var sources: [DiscoverySource] = []
@@ -369,6 +392,7 @@ class ScanOrchestrator: ObservableObject {
                     if let ssdpType = ipToSSDPType[ip] { evidence.append("SSDP 自报: \(ssdpType.rawValue)") }
                     if let hn = hostname, hn != "网关" { evidence.append("主机名: \(hn)") }
                     if !ports.isEmpty { evidence.append("开放端口: \(ports.map(String.init).joined(separator: ", "))") }
+                    if note.learnedType != nil { evidence.append("用户标记: \(note.learnedType!.rawValue)") }
                     if guessedType != finalType {
                         evidence.append("类型修正: \(guessedType.rawValue) → \(finalType.rawValue)")
                     }
@@ -410,6 +434,7 @@ class ScanOrchestrator: ObservableObject {
                         vendor: vendor, deviceType: finalType, openPorts: ports,
                         isOnline: !isARPOnly, isGateway: ip == gateway!,
                         isLocalDevice: ip == localIP!,
+                        isStealth: isARPOnly,
                         discoverySources: sources,
                         identificationConfidence: confidence,
                         identificationEvidence: evidence,

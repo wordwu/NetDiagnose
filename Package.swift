@@ -7,7 +7,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "NetDiagnose",
-            path: "Sources/NetDiagnose"
+            path: "Sources/NetDiagnose",
+            resources: [.copy("Resources/")]
         ),
         .testTarget(
             name: "NetDiagnoseTests",

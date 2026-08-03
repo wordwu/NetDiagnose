@@ -311,6 +311,35 @@ struct TopologyHTMLView: NSViewRepresentable {
         function deviceClicked(ip) {
             window.webkit.messageHandlers.deviceClick.postMessage(ip);
         }
+        (function() {
+            var svg = document.querySelector('svg');
+            var container = document.querySelector('.diagram-container');
+            var scale = 1, tx = 0, ty = 0;
+            var dragging = false, startX = 0, startY = 0, startTx = 0, startTy = 0;
+            function apply() {
+                svg.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+                svg.style.transformOrigin = '0 0';
+            }
+            container.addEventListener('wheel', function(e) {
+                e.preventDefault();
+                var factor = e.deltaY < 0 ? 1.1 : 0.9;
+                scale = Math.min(3, Math.max(0.5, scale * factor));
+                apply();
+            }, {passive: false});
+            container.addEventListener('mousedown', function(e) {
+                if (e.target && e.target.tagName === 'rect') return;
+                dragging = true;
+                startX = e.clientX; startY = e.clientY;
+                startTx = tx; startTy = ty;
+            });
+            window.addEventListener('mousemove', function(e) {
+                if (!dragging) return;
+                tx = startTx + (e.clientX - startX);
+                ty = startTy + (e.clientY - startY);
+                apply();
+            });
+            window.addEventListener('mouseup', function() { dragging = false; });
+        })();
         </script></head><body>
         <div class="header">
           <div class="header-row">
@@ -318,6 +347,7 @@ struct TopologyHTMLView: NSViewRepresentable {
             <h1>网络拓扑</h1>
           </div>
           <p class="subtitle">\(htmlEscape(config.cidrNotation)) · 在线 \(onlineCount) / \(devices.count) 台 · \(df.string(from: now))</p>
+          <p class="subtitle" style="color:#334155;margin-left:1.25rem">滚轮缩放 · 拖拽平移</p>
         </div>
         <div class="diagram-container">
           \(svg)

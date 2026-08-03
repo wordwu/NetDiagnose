@@ -25,6 +25,9 @@ struct DiagnosticConclusionView: View {
                 // Key metrics row
                 metricsRow
 
+                // Latency distribution chart
+                latencyChart
+
                 // Finding cards
                 if visibleFindings.isEmpty {
                     emptyState
@@ -115,6 +118,54 @@ struct DiagnosticConclusionView: View {
         .padding(.vertical, 12)
         .background(Color.white.opacity(0.04))
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    var latencyChart: some View {
+        let withLatency = devices
+            .filter { $0.latencyMs != nil }
+            .sorted { ($0.latencyMs ?? 0) > ($1.latencyMs ?? 0) }
+        guard !withLatency.isEmpty else {
+            return AnyView(EmptyView())
+        }
+        let top = Array(withLatency.prefix(6))
+        let maxLat = max(top.first?.latencyMs ?? 1, 1)
+        return AnyView(
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("延迟分布（Top \(top.count)）", systemImage: "chart.bar.fill")
+                        .font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
+                    Spacer()
+                    Text("P90: \(ExportService.p90Text(devices))")
+                        .font(.system(size: 11, design: .monospaced)).foregroundColor(.gray)
+                }
+
+                ForEach(top) { d in
+                    HStack(spacing: 8) {
+                        Text(d.hostname ?? d.ipAddress)
+                            .font(.system(size: 11)).foregroundColor(.gray)
+                            .frame(width: 90, alignment: .leading).lineLimit(1)
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.06))
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(d.latencyMs! < 20 ? Color.green
+                                        : d.latencyMs! < 50 ? Color.yellow
+                                        : d.latencyMs! < 100 ? Color.orange : Color.red)
+                                    .frame(width: max(4, geo.size.width * CGFloat(d.latencyMs! / maxLat)))
+                            }
+                        }
+                        .frame(height: 12)
+                        Text(String(format: "%.0fms", d.latencyMs!))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(width: 42, alignment: .trailing)
+                    }
+                }
+            }
+            .padding(16)
+            .background(Color(hex: "#0f172a"))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        )
     }
 
     var emptyState: some View {

@@ -10,6 +10,8 @@ struct DiagnosticEngine {
         var findings: [DiagnosticFinding] = []
 
         let online = devices.filter(\.isOnline)
+        let stealth = devices.filter { $0.isStealth }
+        let visible = devices.filter { !$0.isStealth }
         let risky = devices.filter { $0.riskLevel != .low }
         let unknown = devices.filter { $0.deviceType == .unknown || $0.identificationConfidence == .low }
         let highLatency = devices.filter { ($0.latencyMs ?? 0) > 100 }
@@ -28,20 +30,24 @@ struct DiagnosticEngine {
         }
 
         // ── 1. 网络基础 ──
-        if online.isEmpty {
+        if online.isEmpty && stealth.isEmpty {
             findings.append(DiagnosticFinding(severity: .critical,
                 title: "全部设备离线", explanation: "\(devices.count) 台设备无一在线，路由器可能宕机或子网选错",
                 action: "检查路由器电源、网线、确认扫描子网与当前网络一致"))
-        } else if devices.count > 0 {
-            let ratio = Double(online.count) / Double(devices.count)
+        } else if online.isEmpty && !stealth.isEmpty {
+            findings.append(DiagnosticFinding(severity: .warning,
+                title: "仅发现隐身设备", explanation: "\(stealth.count) 台设备在 ARP 表中但未响应 ping（可能屏蔽 ICMP）",
+                action: "网络可能正常，只是设备禁 ping；可尝试深度扫描"))
+        } else if visible.count > 0 {
+            let ratio = Double(online.count) / Double(visible.count)
             if ratio >= 0.9 {
                 findings.append(DiagnosticFinding(severity: .good,
-                    title: "在线率良好", explanation: "\(online.count)/\(devices.count) 台在线 (\(Int(ratio*100))%)",
+                    title: "在线率良好", explanation: "\(online.count)/\(visible.count) 台在线 (\(Int(ratio*100))%)",
                     action: "网络状态健康"))
             } else if ratio < 0.5 {
-                let offlineIPs = devices.filter { !$0.isOnline }.map { name($0) }
+                let offlineIPs = visible.filter { !$0.isOnline }.map { name($0) }
                 findings.append(DiagnosticFinding(severity: .warning,
-                    title: "近半设备离线", explanation: "仅 \(online.count)/\(devices.count) 台在线。离线: \(offlineIPs.joined(separator: "、"))",
+                    title: "近半设备离线", explanation: "仅 \(online.count)/\(visible.count) 台在线。离线: \(offlineIPs.joined(separator: "、"))",
                     action: "检查网关是否重启、DHCP 租约是否过期", affectedIPs: offlineIPs))
             }
         }

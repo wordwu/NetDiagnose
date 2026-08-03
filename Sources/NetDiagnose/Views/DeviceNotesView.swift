@@ -5,6 +5,7 @@ struct DeviceNotesView: View {
     @State private var label: String
     @State private var memo: String
     @State private var isKnown: Bool
+    @State private var learnedType: DeviceType?
     @Environment(\.dismiss) private var dismiss
 
     private let notesService = DeviceNotesService.shared
@@ -15,6 +16,7 @@ struct DeviceNotesView: View {
         _label = State(initialValue: note.label)
         _memo = State(initialValue: note.memo)
         _isKnown = State(initialValue: note.isKnown)
+        _learnedType = State(initialValue: note.learnedType)
     }
 
     var body: some View {
@@ -23,7 +25,7 @@ struct DeviceNotesView: View {
                 Text("编辑备注").font(.system(size: 16, weight: .bold)).foregroundColor(.white)
                 Spacer()
                 Button("保存") {
-                    notesService.set(note: DeviceNote(ip: device.ipAddress, label: label, memo: memo, isKnown: isKnown))
+                    notesService.set(note: DeviceNote(ip: device.ipAddress, label: label, memo: memo, isKnown: isKnown, learnedType: learnedType))
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent).tint(.cyan).controlSize(.small)
@@ -68,10 +70,27 @@ struct DeviceNotesView: View {
                 if isKnown {
                     Text("已知设备不会在陌生设备警告中出现").font(.system(size: 11)).foregroundColor(.secondary)
                 }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("设备类型（可选，标记后自动识别记住）").font(.system(size: 12)).foregroundColor(.gray)
+                    Picker("类型", selection: $learnedType) {
+                        Text("自动识别").tag(DeviceType?.none)
+                        ForEach(DeviceType.allCases, id: \.self) { t in
+                            Text(t.rawValue).tag(DeviceType?.some(t))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity)
+                    .padding(8)
+                    .background(Color.white.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    Text("标记一次，以后扫描这台设备都会优先显示该类型")
+                        .font(.system(size: 11)).foregroundColor(.secondary)
+                }
             }
             .padding()
         }
-        .frame(width: 380, height: 360)
+        .frame(width: 380, height: 440)
         .background(Color(hex: "#020617"))
     }
 }

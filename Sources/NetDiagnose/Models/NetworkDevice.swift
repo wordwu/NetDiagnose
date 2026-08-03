@@ -156,6 +156,7 @@ struct NetworkDevice: Identifiable, Codable, Equatable {
     var isOnline: Bool
     var isGateway: Bool
     var isLocalDevice: Bool
+    var isStealth: Bool = false   // ARP 在但 ping 不通（可能屏蔽 ICMP）
     var lastSeen: Date
     var osGuess: String?
     var services: [String]
@@ -178,6 +179,7 @@ struct NetworkDevice: Identifiable, Codable, Equatable {
         isOnline: Bool = true,
         isGateway: Bool = false,
         isLocalDevice: Bool = false,
+        isStealth: Bool = false,
         lastSeen: Date = Date(),
         osGuess: String? = nil,
         services: [String] = [],
@@ -199,6 +201,7 @@ struct NetworkDevice: Identifiable, Codable, Equatable {
         self.isOnline = isOnline
         self.isGateway = isGateway
         self.isLocalDevice = isLocalDevice
+        self.isStealth = isStealth
         self.lastSeen = lastSeen
         self.osGuess = osGuess
         self.services = services
