@@ -2,11 +2,16 @@ import SwiftUI
 
 @main
 struct NetDiagnoseApp: App {
+    @StateObject private var orchestrator = ScanOrchestrator()
+
     var body: some Scene {
-        Window("NetDiagnose — 免费网络健康诊断", id: "main") {
-            ContentView()
+        WindowGroup {
+            ContentView(orchestrator: orchestrator)
+                .frame(minWidth: 900, minHeight: 700)
+                .preferredColorScheme(.dark)
         }
-        .windowResizability(.contentSize)
-        .defaultSize(width: 700, height: 580)
+        .windowStyle(.titleBar)
+        .windowToolbarStyle(.unified)
+        .defaultSize(width: 1100, height: 800)
     }
 }

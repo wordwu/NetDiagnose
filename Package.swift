@@ -7,8 +7,13 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "NetDiagnose",
-            path: "Sources/NetDiagnose",
-            resources: [.process("Resources/")]
+            path: "Sources/NetDiagnose"
+        ),
+        .testTarget(
+            name: "NetDiagnoseTests",
+            dependencies: ["NetDiagnose"],
+            path: "Tests/NetDiagnoseTests",
+            resources: []
         )
     ]
 )
