@@ -9,6 +9,22 @@ struct PingResult {
     let latency: Double?
 }
 
+/// 线程安全的扫描取消令牌：Task.detached 不继承父任务取消，用它传递取消状态
+final class ScanCancellationToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+}
+
 // ---- ARP Entry ----
 struct ArpEntry {
     let ip: String
@@ -440,27 +456,28 @@ class NetworkScanner {
     }
 
     /// Ping sweep an IP list（两轮：第一轮未响应的第二轮补扫，降低偶发丢包漏报）
-    static func pingSweep(ips: [String], skipIPs: Set<String> = [], maxConcurrent: Int = 32) -> [PingResult] {
+    static func pingSweep(ips: [String], skipIPs: Set<String> = [], maxConcurrent: Int = 32, cancelToken: ScanCancellationToken? = nil) -> [PingResult] {
         let toCheck = ips.filter { !skipIPs.contains($0) }
-        var results = pingBatch(toCheck, maxConcurrent: maxConcurrent)
+        var results = pingBatch(toCheck, maxConcurrent: maxConcurrent, cancelToken: cancelToken)
+        if cancelToken?.isCancelled == true { return results }
 
         // 第二轮补扫
         let hit = Set(results.map { $0.ip })
         let missed = toCheck.filter { !hit.contains($0) }
         if !missed.isEmpty {
-            results += pingBatch(missed, maxConcurrent: maxConcurrent)
+            results += pingBatch(missed, maxConcurrent: maxConcurrent, cancelToken: cancelToken)
         }
         return results
     }
 
     /// 旧签名保留兼容：默认 /24
-    static func pingSweep(subnet: String, skipIPs: Set<String> = [], maxConcurrent: Int = 32) -> [PingResult] {
+    static func pingSweep(subnet: String, skipIPs: Set<String> = [], maxConcurrent: Int = 32, cancelToken: ScanCancellationToken? = nil) -> [PingResult] {
         let prefix = subnet.components(separatedBy: ".").prefix(3).joined(separator: ".")
         let ips = (1...254).map { "\(prefix).\($0)" }
-        return pingSweep(ips: ips, skipIPs: skipIPs, maxConcurrent: maxConcurrent)
+        return pingSweep(ips: ips, skipIPs: skipIPs, maxConcurrent: maxConcurrent, cancelToken: cancelToken)
     }
 
-    private static func pingBatch(_ ips: [String], maxConcurrent: Int) -> [PingResult] {
+    private static func pingBatch(_ ips: [String], maxConcurrent: Int, cancelToken: ScanCancellationToken? = nil) -> [PingResult] {
         var results = [PingResult]()
         let queue = DispatchQueue(label: "nettopo.ping", attributes: .concurrent)
         let group = DispatchGroup()
@@ -484,8 +501,12 @@ class NetworkScanner {
                 }
             }
         }
-        // 兜底：最多等 60 秒（32 并发两轮 ping 正常情况下远小于此）
-        _ = group.wait(timeout: .now() + 60)
+        // 轮询等待：每 0.25 秒检查一次取消，最多等 60 秒兜底
+        let deadline = Date().addingTimeInterval(60)
+        while group.wait(timeout: .now() + 0.25) == .timedOut {
+            if cancelToken?.isCancelled == true { return results }
+            if Date() > deadline { break }
+        }
         return results
     }
 

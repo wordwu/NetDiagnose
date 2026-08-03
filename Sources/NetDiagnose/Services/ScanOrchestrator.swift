@@ -11,6 +11,7 @@ class ScanOrchestrator: ObservableObject {
     @Published var errorMessage: String? = nil
     @Published var selectedScenario: NetworkScenario? = nil
     private var scanTask: Task<Void, Never>?
+    private var cancelToken = ScanCancellationToken()
 
     var previousSnapshot: ScanSnapshot? {
         ScanHistoryService.shared.latest()
@@ -165,6 +166,7 @@ class ScanOrchestrator: ObservableObject {
     }
 
     func reset() {
+        cancelToken.cancel()
         scanTask?.cancel()
         scanTask = nil
         scanResult = nil
@@ -180,6 +182,8 @@ class ScanOrchestrator: ObservableObject {
         errorMessage = nil
         progressValue = 0
         self.scanMode = mode
+        cancelToken = ScanCancellationToken()
+        let token = cancelToken
         let startedAt = Date()
         let maxPingConcurrency = mode.pingConcurrency
         let doBonjour = mode.includesBonjour
@@ -237,10 +241,10 @@ class ScanOrchestrator: ObservableObject {
                 progressValue = 0.05
 
                 let pingResults = await Task.detached {
-                    NetworkScanner.pingSweep(ips: allHostIPs, skipIPs: [gateway!, localIP!], maxConcurrent: maxPingConcurrency)
+                    NetworkScanner.pingSweep(ips: allHostIPs, skipIPs: [gateway!, localIP!], maxConcurrent: maxPingConcurrency, cancelToken: token)
                 }.value
 
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled && !token.isCancelled else { return }
 
                 scanProgress = "发现 \(pingResults.count + 1) 台在线设备"
                 progressValue = 0.25
@@ -396,6 +400,26 @@ class ScanOrchestrator: ObservableObject {
                     if note.learnedType != nil { evidence.append("用户标记: \(note.learnedType!.rawValue)") }
                     if guessedType != finalType {
                         evidence.append("类型修正: \(guessedType.rawValue) → \(finalType.rawValue)")
+                    }
+                    // 未识别设备给出最可能的候选猜测，避免"什么都不说"
+                    if finalType == .unknown {
+                        let candidate: String
+                        if let v = vendor, !v.isEmpty {
+                            candidate = "可能是 \(v) 品牌的设备（路由器/电脑/智能设备之一）"
+                        } else if !ports.isEmpty {
+                            if ports.contains(80) || ports.contains(443) || ports.contains(8080) {
+                                candidate = "可能是电脑或路由器（开放了 Web 管理端口）"
+                            } else if ports.contains(1883) || ports.contains(8883) {
+                                candidate = "可能是智能设备（开放了 MQTT 端口）"
+                            } else {
+                                candidate = "开放了端口 \(ports.sorted().map(String.init).joined(separator: "、"))，暂无法确定类型"
+                            }
+                        } else if hostname != nil {
+                            candidate = "未响应识别线索，可在备注中手动标记类型"
+                        } else {
+                            candidate = "可在备注中手动标记类型，下次扫描会自动记住"
+                        }
+                        evidence.append("线索: \(candidate)")
                     }
 
                     // ── Confidence ──

@@ -252,6 +252,11 @@ struct HomeView: View {
                 featureItem(icon: "doc.richtext", text: "PDF 报告")
             }
 
+            Text("NetDiagnose v1.1 · 免费 · 无广告 · 数据仅保存在本机")
+                .font(.system(size: 10))
+                .foregroundColor(Color.white.opacity(0.25))
+                .padding(.top, 10)
+
             Spacer()
         }
         .padding()
