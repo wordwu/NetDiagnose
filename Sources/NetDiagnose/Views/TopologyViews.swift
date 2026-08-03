@@ -408,25 +408,9 @@ struct ExportReportSheet: View {
                     // Save button
                     Button("保存 PDF...") {
                         let html = generatePDFHTML()
-                        let savePanel = NSSavePanel()
-                        savePanel.allowedContentTypes = [.pdf]
-                        savePanel.nameFieldStringValue = "NetDiagnose-\(Date().ISO8601Short).pdf"
-                        savePanel.begin { response in
-                            if response == .OK, let url = savePanel.url {
-                                let webView = WebViewWrapper(html: html)
-                                let config = WKPDFConfiguration()
-                                config.rect = CGRect(x: 0, y: 0, width: 612, height: 792)
-                                let sem = DispatchSemaphore(value: 0)
-                                var pdfData = Data()
-                                webView.webView.createPDF(configuration: config) { result in
-                                    if case .success(let data) = result { pdfData = data }
-                                    sem.signal()
-                                }
-                                _ = sem.wait(timeout: .now() + 8)
-                                try? pdfData.write(to: url)
-                            }
-                            dismiss()
-                        }
+                        // 复用统一的导出实现（异步渲染、支持多页、不阻塞主线程）
+                        ExportService.savePDF(html: html, defaultName: "NetDiagnose-\(Date().ISO8601Short).pdf") { _ in }
+                        dismiss()
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.cyan)
@@ -486,45 +470,6 @@ struct ExportReportSheet: View {
         <p style="font-size:10px;color:#999">NetTopo \u{00B7} \u{7F51}\u{7EDC}\u{62D3}\u{6251}\u{53EF}\u{89C6}\u{5316}\u{4E13}\u{5BB6} \u{00B7} 81677632@qq.com</p></div></body></html>
         """
         return h
-    }
-}
-
-// MARK: - WebView PDF Wrapper
-
-class WebViewWrapper: NSView, WKNavigationDelegate {
-    let webView: WKWebView
-    private var loadDone = DispatchSemaphore(value: 0)
-    private var loadError: Error? = nil
-
-    init(html: String) {
-        let config = WKWebViewConfiguration()
-        webView = WKWebView(frame: .zero, configuration: config)
-        super.init(frame: NSRect(x: 0, y: 0, width: 612, height: 792))
-        webView.frame = bounds
-        webView.autoresizingMask = [.width, .height]
-        webView.navigationDelegate = self
-        addSubview(webView)
-
-        loadDone = DispatchSemaphore(value: 0)
-        loadError = nil
-        webView.loadHTMLString(html, baseURL: nil)
-        _ = loadDone.wait(timeout: .now() + 10) // wait for loading
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        loadDone.signal()
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        loadError = error
-        loadDone.signal()
-    }
-
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        loadError = error
-        loadDone.signal()
     }
 }
 

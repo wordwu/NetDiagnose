@@ -53,11 +53,11 @@ class BackgroundMonitorService: ObservableObject {
                     newDevices.append(label)
                 }
 
-                self.knownMACs = self.knownMACs.union(newMACs)
-                self.saveKnownMACs()
-
                 let count = newDevices.count
                 DispatchQueue.main.async {
+                    // @Published 必须在主线程更新
+                    self.knownMACs = self.knownMACs.union(newMACs)
+                    self.saveKnownMACs()
                     self.sendNotification(
                         title: "发现 \(count) 台新设备",
                         body: newDevices.prefix(5).joined(separator: "、") + (count > 5 ? " 等" : ""),
