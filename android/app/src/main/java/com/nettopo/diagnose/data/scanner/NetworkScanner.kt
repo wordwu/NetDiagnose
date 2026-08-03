@@ -403,63 +403,74 @@ object NetworkScanner {
 
     fun guessDevice(
         ip: String, mac: String?, vendor: String?, hostname: String?,
-        ports: List<Int>, services: List<String> = emptyList()
+        ports: List<Int>, services: List<String> = emptyList(), gatewayIP: String? = null
     ): DeviceType {
         val hn = hostname?.lowercase() ?: ""
         val vd = vendor?.lowercase() ?: ""
+        val portSet = ports.toSet()
+        val svcSet = services.toSet()
 
-        // Gateway detection
-        if (ip.endsWith(".1") || ip.endsWith(".254")) return DeviceType.ROUTER
-        if (hn.contains("gateway") || hn.contains("router")) return DeviceType.ROUTER
+        // 1) 网关：实际网关 IP 优先，其次 .1 兜底
+        if (ip == gatewayIP || (gatewayIP == null && ip.endsWith(".1"))) return DeviceType.ROUTER
 
-        // By hostname
-        if (hn.isNotEmpty()) {
-            if (hn.contains("iphone") || hn.contains("android")) return DeviceType.PHONE
-            if (hn.contains("ipad")) return DeviceType.TABLET
-            if (hn.contains("tv") || hn.contains("shield") || hn.contains("roku")
-                || hn.contains("appletv")) return DeviceType.TV
-            if (hn.contains("camera") || hn.contains("cam") || hn.contains("hikvision")
-                || hn.contains("dahua")) return DeviceType.CAMERA
-            if (hn.contains("printer") || hn.contains("hp-") || hn.contains("brother")
-                || hn.contains("canon")) return DeviceType.PRINTER
-            if (hn.contains("nas") || hn.contains("synology") || hn.contains("qnap")
-                || hn.contains("diskstation")) return DeviceType.NAS
-            if (hn.contains("echo") || hn.contains("alexa") || hn.contains("nest")
-                || hn.contains("hue") || hn.contains("xiaomi") || hn.contains("mi-")) return DeviceType.IOT
-            if (hn.contains("switch") || hn.contains("ap-") || hn.contains("ubnt")) return DeviceType.SWITCH
+        // 2) mDNS/Bonjour 自报（设备自己报的类型最可靠）
+        if (svcSet.any { it.contains("printer") || it.contains("pdl-datastream") || it.contains("ipp") }) return DeviceType.PRINTER
+        if (svcSet.any { it.contains("smb") || it.contains("afpovertcp") }) return DeviceType.NAS
+        if (svcSet.any { it.contains("airplay") || it.contains("googlecast") || it.contains("spotify") || it.contains("raop") }) return DeviceType.TV
+        if (svcSet.any { it.contains("hap") || it.contains("homekit") || it.contains("miio") }) return DeviceType.IOT
+
+        // 3) 主机名具体设备词（先于品牌词，避免"小米插座"被认成手机）
+        val nasWords = listOf("nas", "diskstation", "synology", "qnap", "wdmycloud", "freenas", "truenas", "nvr", "storage")
+        val camWords = listOf("camera", "cam-", "cam_", "ipc", "hikvision", "dahua", "reolink", "doorbell", "cctv")
+        val printerWords = listOf("printer", "brother", "canon-", "epson", "xerox", "laserjet", "deskjet")
+        val iotWords = listOf("plug", "socket", "sensor", "light", "bulb", "switch", "outlet", "curtain", "lock", "door",
+            "smoke", "leak", "motion", "contact", "thermometer", "humidifier", "purifier", "water", "heater",
+            "yeelight", "philips-hue", "shelly", "sonoff", "tasmota", "esphome", "tuya", "aqara", "lumi", "viomi",
+            "chuangmi", "vacuum", "speaker", "soundbar", "settop", "tv-box", "dongle")
+        val phoneWords = listOf("iphone", "ipad", "android", "pixel", "oneplus", "redmi", "honor",
+            "galaxy", "samsung-sm", "huawei-p", "huawei-mate", "huawei-nova")
+
+        for (w in nasWords) if (hn.contains(w) || vd.contains(w)) return DeviceType.NAS
+        for (w in camWords) if (hn.contains(w)) return DeviceType.CAMERA
+        for (w in printerWords) if (hn.contains(w) || vd.contains(w)) return DeviceType.PRINTER
+        for (w in iotWords) if (hn.contains(w) || vd.contains(w)) return DeviceType.IOT
+        for (w in phoneWords) if (hn.contains(w)) return DeviceType.PHONE
+
+        // 4) 端口签名（组合比单端口可靠）
+        if (portSet.containsAll(setOf(5000, 5001))) return DeviceType.NAS
+        if (portSet.containsAll(setOf(445, 548))) return DeviceType.NAS
+        if (portSet.containsAll(setOf(515, 631))) return DeviceType.PRINTER
+        if (portSet.contains(554) || portSet.contains(5543)) return DeviceType.CAMERA
+        if (portSet.contains(1883) || portSet.contains(8883)) return DeviceType.IOT
+        if (portSet.contains(5000) || portSet.contains(5001)) return DeviceType.NAS
+        if (portSet.contains(515) || portSet.contains(631) || portSet.contains(9100)) return DeviceType.PRINTER
+
+        // 5) 手机品牌厂商：无服务端口（或只有 AirDrop/mDNS）→ 手机
+        val phoneVendors = listOf("apple", "samsung", "xiaomi", "huawei", "honor", "oppo", "vivo",
+            "oneplus", "google", "motorola", "nokia", "meizu", "realme", "zte")
+        if (phoneVendors.any { vd.contains(it) } &&
+            (portSet.isEmpty() || portSet.all { it == 62078 || it == 5353 || it == 5000 })) {
+            return DeviceType.PHONE
         }
 
-        // By vendor OUI
-        if (vd.isNotEmpty()) {
-            if (vd.contains("apple")) {
-                return if (ports.contains(62078) || hn.contains("iphone")) DeviceType.PHONE
-                else DeviceType.COMPUTER
-            }
-            if (vd.contains("samsung")) return DeviceType.PHONE
-            if (vd.contains("huawei") || vd.contains("honor")) return DeviceType.PHONE
-            if (vd.contains("xiaomi") || vd.contains("redmi")) return DeviceType.PHONE
-            if (vd.contains("lg")) return DeviceType.TV
-            if (vd.contains("sony")) return if (ports.contains(8060)) DeviceType.TV else DeviceType.PHONE
-            if (vd.contains("nintendo")) return DeviceType.IOT
-            if (vd.contains("google")) return DeviceType.IOT
-            if (vd.contains("amazon")) return DeviceType.IOT
-            if (vd.contains("raspberry")) return DeviceType.COMPUTER
-            if (vd.contains("intel") || vd.contains("dell") || vd.contains("lenovo")
-                || vd.contains("asus") || vd.contains("msi") || vd.contains("acer")) return DeviceType.COMPUTER
-            if (vd.contains("cisco") || vd.contains("juniper") || vd.contains("arista")
-                || vd.contains("tplink") || vd.contains("netgear") || vd.contains("d-link")) return DeviceType.SWITCH
-            if (vd.contains("hikvision") || vd.contains("dahua") || vd.contains("axis")) return DeviceType.CAMERA
-            if (vd.contains("hp") || vd.contains("brother") || vd.contains("canon")
-                || vd.contains("epson") || vd.contains("xerox")) return DeviceType.PRINTER
-            if (vd.contains("synology") || vd.contains("qnap") || vd.contains("western")
-                || vd.contains("seagate")) return DeviceType.NAS
+        // 6) 网络设备品牌：开 Web 管理端口 → 路由器；否则交换机/AP
+        val networkBrands = listOf("asus", "tp-link", "tplink", "netgear", "ubiquiti", "mikrotik", "cisco",
+            "d-link", "dlink", "tenda", "mercury", "huawei", "zte", "linksys", "arris", "juniper", "arista")
+        if (networkBrands.any { vd.contains(it) || hn.contains(it) }) {
+            if (portSet.any { it == 80 || it == 443 || it == 8080 || it == 8443 }) return DeviceType.ROUTER
+            return DeviceType.SWITCH
         }
 
-        // By ports
-        if (ports.contains(3389) || ports.contains(5900)) return DeviceType.COMPUTER
-        if (ports.contains(9100)) return DeviceType.PRINTER
-        if (ports.contains(554)) return DeviceType.CAMERA
-        if (ports.contains(5000) || ports.contains(5001)) return DeviceType.NAS
+        // 7) 厂商兜底
+        if (vd.contains("intel") || vd.contains("dell") || vd.contains("hp") || vd.contains("lenovo") ||
+            vd.contains("msi") || vd.contains("acer") || vd.contains("raspberry") || vd.contains("microsoft")) return DeviceType.COMPUTER
+        if (vd.contains("sony") || vd.contains("lg")) return DeviceType.TV
+        if (vd.contains("nest") || vd.contains("ring") || vd.contains("arlo") || vd.contains("axis")) return DeviceType.CAMERA
+        if (vd.contains("synology") || vd.contains("qnap") || vd.contains("seagate") || vd.contains("western")) return DeviceType.NAS
+
+        // 8) 端口兜底
+        if (portSet.any { it == 80 || it == 443 || it == 8080 || it == 22 || it == 8443 }) return DeviceType.COMPUTER
+        if (portSet.contains(3389) || portSet.contains(5900)) return DeviceType.COMPUTER
 
         return DeviceType.UNKNOWN
     }
@@ -468,8 +479,7 @@ object NetworkScanner {
 
     fun lookupVendor(mac: String): String? {
         return try {
-            val hex = mac.uppercase().filter { it in "0123456789ABCDEF" }.take(6)
-            OUIDatabase.entries[hex]
+            OUIDatabase.lookup(mac)
         } catch (_: Exception) { null }
     }
 

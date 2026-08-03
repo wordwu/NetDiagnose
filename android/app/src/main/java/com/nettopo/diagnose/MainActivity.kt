@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.runtime.*
 import com.nettopo.diagnose.data.engine.DiagnosticEngine
 import com.nettopo.diagnose.data.models.*
+import com.nettopo.diagnose.data.scanner.OUIDatabase
 import com.nettopo.diagnose.data.scanner.NetworkScanner
 import com.nettopo.diagnose.ui.screens.*
 import com.nettopo.diagnose.ui.theme.NetDiagnoseTheme
@@ -29,7 +30,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
+        OUIDatabase.init(this)
         setContent {
             NetDiagnoseTheme {
                 var screenState by remember { mutableStateOf<ScreenState>(ScreenState.Home) }
@@ -199,7 +200,7 @@ private suspend fun runScan(
             else -> pingResults.firstOrNull { it.ip == ip }?.hostname
         }
 
-        val deviceType = NetworkScanner.guessDevice(ip, mac, vendor, hostname, ports)
+        val deviceType = NetworkScanner.guessDevice(ip, mac, vendor, hostname, ports, gatewayIP = gw)
         val finalType = if (ip == gw) DeviceType.ROUTER else deviceType
 
         // Discovery sources
