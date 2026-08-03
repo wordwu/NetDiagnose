@@ -296,24 +296,43 @@ class ScanOrchestrator: ObservableObject {
                 }
                 // Add ARP-only IPs, will mark them as possibly offline
                 let allIPsWithARP = allIPs + arpOnlyIPs
-                var devices = [NetworkDevice]()
                 let total = allIPsWithARP.count
 
-                for (idx, ip) in allIPsWithARP.enumerated() {
+                // 并发端口扫描（每批 8 台，避免一次开太多连接），完成后统一构建设备
+                var portResults = [Int: [Int]]()
+                var scannedCount = 0
+                let portBatch = 8
+                for batchStart in stride(from: 0, to: total, by: portBatch) {
                     guard !Task.isCancelled else { return }
+                    let batchEnd = min(batchStart + portBatch, total)
+                    let batchIPs = Array(allIPsWithARP[batchStart..<batchEnd])
+                    await withTaskGroup(of: (Int, [Int]).self) { group in
+                        for (offset, ip) in batchIPs.enumerated() {
+                            let idx = batchStart + offset
+                            let isARPOnly = arpOnlyIPs.contains(ip)
+                            group.addTask {
+                                let ports = await Task.detached {
+                                    isARPOnly ? NetworkScanner.checkKeyPorts(ip: ip) : NetworkScanner.checkPorts(ip: ip, mode: mode)
+                                }.value
+                                return (idx, ports)
+                            }
+                        }
+                        for await (idx, ports) in group {
+                            portResults[idx] = ports
+                            scannedCount += 1
+                            scanProgress = "端口扫描 \(scannedCount)/\(total) - \(allIPsWithARP[idx])"
+                            progressValue = 0.50 + 0.45 * Float(scannedCount) / Float(total)
+                        }
+                    }
+                }
+                guard !Task.isCancelled else { return }
 
+                var devices = [NetworkDevice]()
+                for (idx, ip) in allIPsWithARP.enumerated() {
                     let isARPOnly = arpOnlyIPs.contains(ip)
-                    scanProgress = "端口扫描 \(idx+1)/\(total) - \(ip)"
-                    progressValue = 0.50 + 0.45 * Float(idx+1) / Float(total)
-
+                    let ports = portResults[idx] ?? []
                     let mac = ipToMac[ip]
                     let vendor = ipToVendor[ip]
-                    let ports: [Int]
-                    if isARPOnly {
-                        ports = await Task.detached { NetworkScanner.checkKeyPorts(ip: ip) }.value
-                    } else {
-                        ports = await Task.detached { NetworkScanner.checkPorts(ip: ip, mode: mode) }.value
-                    }
                     let bonjourTypes = ipToBonjour[ip] ?? []
                     let hostname: String? = ip == gateway! ? "网关"
                         : pingResults.first(where: { $0.ip == ip })?.hostname
@@ -410,12 +429,29 @@ class ScanOrchestrator: ObservableObject {
                 if doLatency {
                     scanProgress = "测量延迟..."
                     progressValue = 0.96
-                    let onlineCount = updated.filter { $0.isOnline }.count
-                    for i in updated.indices where updated[i].isOnline {
+                    let onlineIndices = updated.indices.filter { updated[$0].isOnline }
+                    let onlineCount = onlineIndices.count
+                    var completed = 0
+                    let latencyBatch = 10
+                    for batchStart in stride(from: 0, to: onlineCount, by: latencyBatch) {
                         guard !Task.isCancelled else { return }
-                        progressValue = 0.96 + 0.04 * Float(i + 1) / Float(max(onlineCount, 1))
-                        scanProgress = "延迟测试 \(i+1)/\(onlineCount) - \(updated[i].ipAddress)"
-                        updated[i].latencyMs = await Task.detached(operation: { NetworkScanner.measureLatency(ip: updated[i].ipAddress) }).value
+                        let batchEnd = min(batchStart + latencyBatch, onlineCount)
+                        let batch = Array(onlineIndices[batchStart..<batchEnd])
+                        await withTaskGroup(of: (Int, Double?).self) { group in
+                            for i in batch {
+                                let ip = updated[i].ipAddress
+                                group.addTask {
+                                    let lat = await Task.detached(operation: { NetworkScanner.measureLatency(ip: ip) }).value
+                                    return (i, lat)
+                                }
+                            }
+                            for await (i, lat) in group {
+                                updated[i].latencyMs = lat
+                                completed += 1
+                                progressValue = 0.96 + 0.04 * Float(completed) / Float(max(onlineCount, 1))
+                                scanProgress = "延迟测试 \(completed)/\(onlineCount)"
+                            }
+                        }
                     }
                     guard !Task.isCancelled else { return }
                 }
