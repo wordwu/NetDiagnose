@@ -174,8 +174,8 @@ struct TopologyHTMLView: NSViewRepresentable {
 
         // ── Internet cloud ──
         svg += "<rect x=\"25\" y=\"\(ry-25)\" width=\"130\" height=\"60\" rx=\"10\" fill=\"rgba(30,41,59,0.6)\" stroke=\"#94a3b8\" stroke-width=\"1.2\"/>"
-        svg += "<text x=\"90\" y=\"\(ry+5)\" fill=\"#94a3b8\" font-size=\"10\" font-weight=\"600\" text-anchor=\"middle\">🌐 INTERNET</text>"
-        svg += "<text x=\"90\" y=\"\(ry+20)\" fill=\"#64748b\" font-size=\"8\" text-anchor=\"middle\">WAN / 光猫</text>"
+        svg += "<text x=\"90\" y=\"\(ry+5)\" fill=\"#94a3b8\" font-size=\"10\" font-weight=\"600\" text-anchor=\"middle\">🌐 互联网</text>"
+        svg += "<text x=\"90\" y=\"\(ry+20)\" fill=\"#64748b\" font-size=\"8\" text-anchor=\"middle\">外网 / 光猫</text>"
 
         // ── Router ──
         let rw = 460, rx = 180
@@ -277,7 +277,7 @@ struct TopologyHTMLView: NSViewRepresentable {
         svg += "<text x=\"927\" y=\"183\" fill=\"white\" font-size=\"9\" font-weight=\"600\" text-anchor=\"middle\">图例</text>"
         let legendItems: [(String, String)] = [
             ("#fbbf24", "路由器/网关"), ("#22d3ee", "计算设备"), ("#34d399", "智能家居"),
-            ("#a78bfa", "NAS/存储"), ("#fb7185", "未识别设备"), ("#94a3b8", "外部/WAN")
+            ("#a78bfa", "NAS/存储"), ("#fb7185", "未识别设备"), ("#94a3b8", "外部/外网")
         ]
         for (i, (color, label)) in legendItems.enumerated() {
             let ly = 196 + i * 18
@@ -352,7 +352,7 @@ struct TopologyHTMLView: NSViewRepresentable {
         <div class="diagram-container">
           \(svg)
         </div>
-        <p class="footer">扫描方式: ARP + ICMP Ping + SSDP/UPnP + TCP 端口 · NetDiagnose</p>
+        <p class="footer">扫描方式: Ping + 地址解析 + 服务发现 + 端口扫描 · NetDiagnose</p>
         </body></html>
         """
     }

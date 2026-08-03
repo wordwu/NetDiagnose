@@ -78,7 +78,7 @@ struct WiFiScanSheet: View {
                                     Text(net.ssid.isEmpty ? "(隐藏)" : net.ssid)
                                         .font(.system(size: 13, weight: .medium)).foregroundColor(.white)
                                     HStack(spacing: 8) {
-                                        Text("CH\(net.channel) \(net.band)")
+                                        Text("信道 \(net.channel) · \(net.band)")
                                             .font(.system(size: 10, design: .monospaced)).foregroundColor(.cyan)
                                         Text(net.security).font(.system(size: 10)).foregroundColor(.gray)
                                     }
